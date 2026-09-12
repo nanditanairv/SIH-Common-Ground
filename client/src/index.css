@@ -52,3 +52,5 @@ h1, h2, h3, p { margin-top: 0; }h1, h2, h3 { font-weight: 600; letter-spacing: -
 .detail-heading-actions { display: flex; align-items: center; gap: 8px; }
 .delete-link { border: 0; background: transparent; color: #b63f2e; font-size: 11px; font-weight: 700; cursor: pointer; }
 .delete-link:hover { color: #8f2e22; text-decoration: underline; }
+.upload-modal .modal-heading h2 { white-space: nowrap; letter-spacing: -.045em; }
+.phone-error { margin-top: 2px; }
