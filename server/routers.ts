@@ -1,5 +1,5 @@
-import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { z } from "zod";
 import { invokeLLM } from "./_core/llm";
 import { storagePut } from "./storage";
 import { COOKIE_NAME } from "@shared/const";
@@ -19,12 +19,32 @@ import {
   proposeSolution,
   sponsorEvent,
 } from "./db";
+import {
+  addSupabaseComment,
+  addSupabaseProjectUpdate,
+  claimSupabaseProblem,
+  deleteSupabaseProblem,
+  getSupabaseProblem,
+  getSupabaseRole,
+  insertSupabaseEvent,
+  insertSupabaseProblem,
+  listSupabaseEvents,
+  listSupabaseProblems,
+  proposeSupabaseSolution,
+  setSupabaseRole,
+  sponsorSupabaseEvent,
+  supabaseEnabled,
+  voteSupabaseProblem,
+} from "./supabase-portal";
+import type { PortalRole } from "./supabase-portal";
 
 const imageInput = z.object({
   name: z.string(),
   mimeType: z.string(),
   dataUrl: z.string().max(5_000_000),
 });
+
+const portalRoleInput = z.enum(["citizen", "university", "industry", "administrator", "municipality"]);
 
 export function isChallengeOwner(challengeOwnerOpenId: string | null | undefined, currentOpenId: string) {
   return Boolean(challengeOwnerOpenId && challengeOwnerOpenId === currentOpenId);
@@ -73,10 +93,20 @@ async function triageChallenge(name: string, description: string, requested: boo
   return fallback;
 }
 
+async function requirePortalRole(user: NonNullable<Parameters<typeof getSupabaseRole>[0]>, allowed: PortalRole[]) {
+  if (!supabaseEnabled()) return;
+  const role = await getSupabaseRole(user);
+  if (!role || !allowed.includes(role)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: `This action requires one of these roles: ${allowed.join(", ")}.` });
+  }
+}
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
+    portalRole: publicProcedure.query(async ({ ctx }) => ctx.user && supabaseEnabled() ? getSupabaseRole(ctx.user) : null),
+    setPortalRole: protectedProcedure.input(z.object({ role: portalRoleInput })).mutation(({ input, ctx }) => setSupabaseRole(ctx.user, input.role)),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
@@ -84,8 +114,8 @@ export const appRouter = router({
     }),
   }),
   challenges: router({
-    list: publicProcedure.query(async () => listChallenges()),
-    detail: publicProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => getChallenge(input.id)),
+    list: publicProcedure.query(async () => supabaseEnabled() ? listSupabaseProblems() : listChallenges()),
+    detail: publicProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => supabaseEnabled() ? getSupabaseProblem(input.id) : getChallenge(input.id)),
     create: publicProcedure.input(z.object({
       citizenName: z.string().min(2),
       name: z.string().min(3),
@@ -102,6 +132,17 @@ export const appRouter = router({
     })).mutation(async ({ input, ctx }) => {
       if (!input.otpVerified) throw new TRPCError({ code: "BAD_REQUEST", message: "Phone verification is required." });
       const triage = await triageChallenge(input.name, input.description, input.urgencyRequested);
+      if (supabaseEnabled()) {
+        const images = [];
+        for (const image of input.images) {
+          const [meta, base64] = image.dataUrl.split(",");
+          const buffer = Buffer.from(base64 || meta, "base64");
+          const stored = await storagePut(`problems/${Date.now()}-${image.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`, buffer, image.mimeType);
+          images.push({ name: image.name, mimeType: image.mimeType, url: stored.url, key: stored.key });
+        }
+        const id = await insertSupabaseProblem({ ...input, email: input.email || null, latitude: input.latitude || null, longitude: input.longitude || null, aiUrgency: triage.urgency, category: triage.category, difficulty: triage.difficulty, user: ctx.user, images });
+        return { id, ...triage, reference: id ? `CG-${String(id).padStart(4, "0")}` : "CG-DEMO" };
+      }
       const challengeId = await insertChallenge({
         citizenName: input.citizenName,
         name: input.name,
@@ -131,36 +172,57 @@ export const appRouter = router({
       }
       return { id: challengeId, ...triage, reference: challengeId ? `CG-${String(challengeId).padStart(4, "0")}` : "CG-DEMO" };
     }),
-    claim: publicProcedure.input(z.object({ id: z.number(), university: z.string().min(2) })).mutation(async ({ input }) => {
-      await claimChallenge(input.id, input.university);
+    claim: protectedProcedure.input(z.object({ id: z.number(), university: z.string().min(2) })).mutation(async ({ input, ctx }) => {
+      await requirePortalRole(ctx.user, ["university", "administrator"]);
+      if (supabaseEnabled()) await claimSupabaseProblem(input.id, input.university, ctx.user);
+      else await claimChallenge(input.id, input.university);
       return { success: true };
     }),
-    update: publicProcedure.input(z.object({
+    update: protectedProcedure.input(z.object({
       challengeId: z.number(),
       authorRole: z.string(),
       authorName: z.string(),
       body: z.string().min(5),
       status: z.string(),
-    })).mutation(async ({ input }) => {
-      const id = await addProjectUpdate(input);
+    })).mutation(async ({ input, ctx }) => {
+      await requirePortalRole(ctx.user, ["university", "industry", "administrator", "municipality"]);
+      const id = supabaseEnabled() ? await addSupabaseProjectUpdate(input, ctx.user) : await addProjectUpdate(input);
       return { success: true, id };
     }),
-    solution: publicProcedure.input(z.object({ id: z.number(), solution: z.string().min(20) })).mutation(async ({ input }) => {
-      await proposeSolution(input.id, input.solution);
+    solution: protectedProcedure.input(z.object({ id: z.number(), solution: z.string().min(20) })).mutation(async ({ input, ctx }) => {
+      await requirePortalRole(ctx.user, ["university", "administrator"]);
+      if (supabaseEnabled()) await proposeSupabaseSolution(input.id, input.solution, ctx.user);
+      else await proposeSolution(input.id, input.solution);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const challenge = await getChallenge(input.id);
-      if (!challenge || !isChallengeOwner(challenge.creatorOpenId, ctx.user.openId)) {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Only the original submitter can delete this challenge." });
+      if (supabaseEnabled()) {
+        const deleted = await deleteSupabaseProblem(input.id, ctx.user);
+        if (!deleted) throw new TRPCError({ code: "FORBIDDEN", message: "Only the original submitter can delete this challenge." });
+      } else {
+        const challenge = await getChallenge(input.id);
+        if (!challenge || !isChallengeOwner(challenge.creatorOpenId, ctx.user.openId)) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Only the original submitter can delete this challenge." });
+        }
+        await deleteChallenge(input.id);
       }
-      await deleteChallenge(input.id);
       return { success: true } as const;
     }),
   }),
+  comments: router({
+    list: publicProcedure.input(z.object({ problemId: z.number() })).query(async ({ input }) => {
+      if (!supabaseEnabled()) return [];
+      const problem = await getSupabaseProblem(input.problemId);
+      return problem?.comments ?? [];
+    }),
+    create: protectedProcedure.input(z.object({ problemId: z.number(), body: z.string().min(2) })).mutation(async ({ input, ctx }) => ({ success: true, id: await addSupabaseComment(input.problemId, input.body, ctx.user) })),
+  }),
+  votes: router({
+    cast: protectedProcedure.input(z.object({ problemId: z.number(), value: z.union([z.literal(-1), z.literal(1)]) })).mutation(async ({ input, ctx }) => ({ success: true, id: await voteSupabaseProblem(input.problemId, input.value, ctx.user) })),
+  }),
   events: router({
-    list: publicProcedure.query(async () => listEvents()),
-    create: publicProcedure.input(z.object({
+    list: publicProcedure.query(async () => supabaseEnabled() ? listSupabaseEvents() : listEvents()),
+    create: protectedProcedure.input(z.object({
       title: z.string().min(4),
       description: z.string().min(10),
       date: z.string().min(4),
@@ -168,17 +230,19 @@ export const appRouter = router({
       university: z.string().min(2),
       challengeId: z.number().optional(),
       sponsorshipTarget: z.number().min(0),
-    })).mutation(async ({ input }) => {
-      const id = await insertEvent({ ...input, challengeId: input.challengeId ?? null, sponsorRaised: 0 });
+    })).mutation(async ({ input, ctx }) => {
+      await requirePortalRole(ctx.user, ["university", "administrator"]);
+      const id = supabaseEnabled() ? await insertSupabaseEvent({ ...input, challengeId: input.challengeId ?? null }, ctx.user) : await insertEvent({ ...input, challengeId: input.challengeId ?? null, sponsorRaised: 0 });
       return { success: true, id };
     }),
-    sponsor: publicProcedure.input(z.object({
+    sponsor: protectedProcedure.input(z.object({
       eventId: z.number(),
       industryName: z.string().min(2),
       amount: z.number().min(0),
       contributionNote: z.string().optional(),
-    })).mutation(async ({ input }) => {
-      const id = await sponsorEvent(input);
+    })).mutation(async ({ input, ctx }) => {
+      await requirePortalRole(ctx.user, ["industry", "administrator"]);
+      const id = supabaseEnabled() ? await sponsorSupabaseEvent(input, ctx.user) : await sponsorEvent(input);
       return { success: true, id };
     }),
   }),
