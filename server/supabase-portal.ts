@@ -40,6 +40,7 @@ type ProblemRow = {
   solution?: string | null;
   creator_open_id?: string | null;
   vote_count?: number;
+  update_count?: number;
 };
 
 async function ensurePortalUser(client: PoolClient, user: AuthUser | null | undefined, role: PortalRole = "citizen") {
@@ -76,6 +77,7 @@ function mapProblem(row: ProblemRow) {
     solution: row.solution ?? null,
     creatorOpenId: row.creator_open_id ?? null,
     voteCount: row.vote_count ?? 0,
+    updateCount: row.update_count ?? 0,
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
   };
@@ -85,7 +87,8 @@ const problemProjection = `
   p.*,
   u.auth_user_id as creator_open_id,
   latest.description as solution,
-  coalesce(v.vote_count, 0)::int as vote_count
+  coalesce(v.vote_count, 0)::int as vote_count,
+  coalesce(upt.update_count, 0)::int as update_count
 `;
 
 const problemJoins = `
@@ -103,6 +106,11 @@ const problemJoins = `
     from votes v
     where v.problem_id = p.id and v.value = 1
   ) v on true
+  left join lateral (
+    select count(*) as update_count
+    from project_updates pu
+    where pu.problem_id = p.id
+  ) upt on true
 `;
 
 export function supabaseEnabled() {
