@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import type { TrpcContext } from "./_core/context";
 import { supabaseQuery, supabaseDbConfigured, withSupabaseClient, toIso, toNumber } from "./supabase";
+import { createSupabaseSignedUrl, uploadSupabaseAttachment } from "./supabase-storage";
 
 export type PortalRole = "citizen" | "university" | "industry" | "administrator" | "municipality";
 
@@ -126,13 +127,20 @@ export async function getSupabaseProblem(id: number) {
   const result = await supabaseQuery<ProblemRow>(`select ${problemProjection} ${problemJoins} where p.id = $1 limit 1`, [id]);
   if (!result?.rows[0]) return undefined;
   const [attachments, updates, comments] = await Promise.all([
-    supabaseQuery("select id, url, file_name, mime_type, latitude, longitude, created_at from attachments where problem_id = $1 order by created_at desc", [id]),
+    supabaseQuery("select id, url, storage_key, attachment_kind, file_name, mime_type, latitude, longitude, created_at from attachments where problem_id = $1 and attachment_kind = 'geotag_photo' order by created_at desc", [id]),
     supabaseQuery("select id, author_role, author_name, body, status, created_at from project_updates where problem_id = $1 order by created_at desc", [id]),
     supabaseQuery("select id, body, created_at from comments where problem_id = $1 order by created_at desc", [id]),
   ]);
   return {
     ...mapProblem(result.rows[0]),
-    media: attachments?.rows.map(row => ({ url: row.url, fileName: row.file_name, mimeType: row.mime_type })) ?? [],
+    media: (await Promise.all((attachments?.rows ?? []).map(async row => {
+      try {
+        const url = row.storage_key ? await createSupabaseSignedUrl(String(row.storage_key), 300) : String(row.url);
+        return { url, fileName: row.file_name, mimeType: row.mime_type };
+      } catch {
+        return null;
+      }
+    }))).filter(Boolean),
     updates: updates?.rows.map(row => ({ body: row.body, authorName: row.author_name, status: row.status, createdAt: toIso(row.created_at) })) ?? [],
     comments: comments?.rows.map(row => ({ id: Number(row.id), body: row.body, createdAt: toIso(row.created_at) })) ?? [],
   };
@@ -153,7 +161,8 @@ export async function insertSupabaseProblem(input: {
   category: string;
   difficulty: string;
   user: AuthUser | null | undefined;
-  images: Array<{ name: string; mimeType: string; url: string; key: string }>;
+  images: Array<{ name: string; mimeType: string; bytes: Buffer }>;
+  aadharFile?: { name: string; mimeType: string; bytes: Buffer };
 }) {
   return withSupabaseClient(async client => {
     await client.query("begin");
@@ -166,10 +175,19 @@ export async function insertSupabaseProblem(input: {
       );
       const id = Number(problem.rows[0].id);
       for (const image of input.images) {
+        const stored = await uploadSupabaseAttachment({ problemId: id, kind: "geotag_photo", fileName: image.name, mimeType: image.mimeType, bytes: image.bytes });
         await client.query(
-          `insert into attachments (problem_id, uploaded_by_user_id, url, storage_key, file_name, mime_type, latitude, longitude)
-           values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [id, portalUser?.id ?? null, image.url, image.key, image.name, image.mimeType, input.latitude, input.longitude],
+          `insert into attachments (problem_id, uploaded_by_user_id, url, storage_key, attachment_kind, file_name, mime_type, latitude, longitude)
+           values ($1, $2, $3, $4, 'geotag_photo', $5, $6, $7, $8)`,
+          [id, portalUser?.id ?? null, stored.path, stored.path, image.name, image.mimeType, input.latitude, input.longitude],
+        );
+      }
+      if (input.aadharFile) {
+        const stored = await uploadSupabaseAttachment({ problemId: id, kind: "aadhar_card", fileName: input.aadharFile.name, mimeType: input.aadharFile.mimeType, bytes: input.aadharFile.bytes });
+        await client.query(
+          `insert into attachments (problem_id, uploaded_by_user_id, url, storage_key, attachment_kind, file_name, mime_type)
+           values ($1, $2, $3, $4, 'aadhar_card', $5, $6)`,
+          [id, portalUser?.id ?? null, stored.path, stored.path, input.aadharFile.name, input.aadharFile.mimeType],
         );
       }
       await client.query("commit");
@@ -278,4 +296,28 @@ export async function setSupabaseRole(user: AuthUser, role: PortalRole) {
 export async function getSupabaseRole(user: AuthUser) {
   const result = await supabaseQuery<{ role: PortalRole }>("select role from users where auth_user_id = $1 limit 1", [user.openId]);
   return result?.rows[0]?.role ?? null;
+}
+
+export async function getSupabaseAttachmentPreview(id: number, user: AuthUser) {
+  const result = await supabaseQuery<{ storage_key: string | null; attachment_kind: "geotag_photo" | "aadhar_card"; file_name: string; mime_type: string; auth_user_id: string | null }>(
+    `select a.storage_key, a.attachment_kind, a.file_name, a.mime_type, owner.auth_user_id
+     from attachments a
+     left join problems p on p.id = a.problem_id
+     left join users owner on owner.id = p.submitter_user_id
+     where a.id = $1 limit 1`,
+    [id],
+  );
+  const attachment = result?.rows[0];
+  if (!attachment?.storage_key) return null;
+  if (attachment.attachment_kind === "aadhar_card") {
+    const role = await getSupabaseRole(user);
+    const allowed = attachment.auth_user_id === user.openId || role === "administrator" || role === "municipality";
+    if (!allowed) return null;
+  }
+  return {
+    url: await createSupabaseSignedUrl(attachment.storage_key, 300),
+    fileName: attachment.file_name,
+    mimeType: attachment.mime_type,
+    expiresIn: 300,
+  };
 }

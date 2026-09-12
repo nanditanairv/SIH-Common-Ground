@@ -22,6 +22,7 @@ import {
 import {
   addSupabaseComment,
   addSupabaseProjectUpdate,
+  getSupabaseAttachmentPreview,
   claimSupabaseProblem,
   deleteSupabaseProblem,
   getSupabaseProblem,
@@ -42,6 +43,12 @@ const imageInput = z.object({
   name: z.string(),
   mimeType: z.string(),
   dataUrl: z.string().max(5_000_000),
+});
+
+const attachmentInput = z.object({
+  name: z.string().min(1).max(180),
+  mimeType: z.string().min(1).max(120),
+  dataUrl: z.string().max(10_000_000),
 });
 
 const portalRoleInput = z.enum(["citizen", "university", "industry", "administrator", "municipality"]);
@@ -129,18 +136,15 @@ export const appRouter = router({
       urgencyRequested: z.boolean(),
       otpVerified: z.boolean(),
       images: z.array(imageInput).max(5),
+      aadharFile: attachmentInput.optional(),
     })).mutation(async ({ input, ctx }) => {
       if (!input.otpVerified) throw new TRPCError({ code: "BAD_REQUEST", message: "Phone verification is required." });
       const triage = await triageChallenge(input.name, input.description, input.urgencyRequested);
       if (supabaseEnabled()) {
-        const images = [];
-        for (const image of input.images) {
-          const [meta, base64] = image.dataUrl.split(",");
-          const buffer = Buffer.from(base64 || meta, "base64");
-          const stored = await storagePut(`problems/${Date.now()}-${image.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`, buffer, image.mimeType);
-          images.push({ name: image.name, mimeType: image.mimeType, url: stored.url, key: stored.key });
-        }
-        const id = await insertSupabaseProblem({ ...input, email: input.email || null, latitude: input.latitude || null, longitude: input.longitude || null, aiUrgency: triage.urgency, category: triage.category, difficulty: triage.difficulty, user: ctx.user, images });
+        const toBuffer = (dataUrl: string) => Buffer.from(dataUrl.split(",")[1] ?? dataUrl, "base64");
+        const images = input.images.map(image => ({ name: image.name, mimeType: image.mimeType, bytes: toBuffer(image.dataUrl) }));
+        const aadharFile = input.aadharFile ? { name: input.aadharFile.name, mimeType: input.aadharFile.mimeType, bytes: toBuffer(input.aadharFile.dataUrl) } : undefined;
+        const id = await insertSupabaseProblem({ ...input, email: input.email || null, latitude: input.latitude || null, longitude: input.longitude || null, aiUrgency: triage.urgency, category: triage.category, difficulty: triage.difficulty, user: ctx.user, images, aadharFile });
         return { id, ...triage, reference: id ? `CG-${String(id).padStart(4, "0")}` : "CG-DEMO" };
       }
       const challengeId = await insertChallenge({
@@ -216,6 +220,9 @@ export const appRouter = router({
       return problem?.comments ?? [];
     }),
     create: protectedProcedure.input(z.object({ problemId: z.number(), body: z.string().min(2) })).mutation(async ({ input, ctx }) => ({ success: true, id: await addSupabaseComment(input.problemId, input.body, ctx.user) })),
+  }),
+  attachments: router({
+    preview: protectedProcedure.input(z.object({ id: z.number() })).query(({ input, ctx }) => getSupabaseAttachmentPreview(input.id, ctx.user)),
   }),
   votes: router({
     cast: protectedProcedure.input(z.object({ problemId: z.number(), value: z.union([z.literal(-1), z.literal(1)]) })).mutation(async ({ input, ctx }) => ({ success: true, id: await voteSupabaseProblem(input.problemId, input.value, ctx.user) })),

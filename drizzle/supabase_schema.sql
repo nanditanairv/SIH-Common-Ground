@@ -78,6 +78,7 @@ create table if not exists attachments (
   uploaded_by_user_id bigint references users(id) on delete set null,
   url text not null,
   storage_key text,
+  attachment_kind text not null default 'geotag_photo' check (attachment_kind in ('geotag_photo', 'aadhar_card')),
   file_name text not null,
   mime_type text not null,
   latitude numeric(10, 7),
@@ -128,6 +129,7 @@ create index if not exists solutions_problem_id_idx on solutions(problem_id, cre
 create index if not exists comments_problem_id_idx on comments(problem_id, created_at desc);
 create index if not exists votes_problem_id_idx on votes(problem_id);
 create index if not exists attachments_problem_id_idx on attachments(problem_id, created_at desc);
+create index if not exists attachments_kind_idx on attachments(problem_id, attachment_kind, created_at desc);
 create index if not exists project_updates_problem_id_idx on project_updates(problem_id, created_at desc);
 create index if not exists tech_events_created_at_idx on tech_events(created_at desc);
 

@@ -54,3 +54,5 @@ h1, h2, h3, p { margin-top: 0; }h1, h2, h3 { font-weight: 600; letter-spacing: -
 .delete-link:hover { color: #8f2e22; text-decoration: underline; }
 .upload-modal .modal-heading h2 { white-space: nowrap; letter-spacing: -.045em; }
 .phone-error { margin-top: 2px; }
+.attachment-preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 16px 0 20px; }
+.attachment-preview-grid img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 6px; border: 1px solid #d7d9ca; background: #f0f5ed; }
