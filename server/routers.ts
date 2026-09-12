@@ -1,13 +1,15 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { invokeLLM } from "./_core/llm";
 import { storagePut } from "./storage";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router } from "./_core/trpc";
+import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
   addProjectUpdate,
   claimChallenge,
+  deleteChallenge,
   getChallenge,
   insertChallenge,
   insertChallengeMedia,
@@ -23,6 +25,10 @@ const imageInput = z.object({
   mimeType: z.string(),
   dataUrl: z.string().max(5_000_000),
 });
+
+export function isChallengeOwner(challengeOwnerOpenId: string | null | undefined, currentOpenId: string) {
+  return Boolean(challengeOwnerOpenId && challengeOwnerOpenId === currentOpenId);
+}
 
 export function triageChallengeFallback(name: string, description: string, requested: boolean) {
   return {
@@ -81,6 +87,7 @@ export const appRouter = router({
     list: publicProcedure.query(async () => listChallenges()),
     detail: publicProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => getChallenge(input.id)),
     create: publicProcedure.input(z.object({
+      citizenName: z.string().min(2),
       name: z.string().min(3),
       description: z.string().min(20),
       phone: z.string().min(8),
@@ -90,10 +97,13 @@ export const appRouter = router({
       latitude: z.string().optional(),
       longitude: z.string().optional(),
       urgencyRequested: z.boolean(),
+      otpVerified: z.boolean(),
       images: z.array(imageInput).max(5),
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
+      if (!input.otpVerified) throw new TRPCError({ code: "BAD_REQUEST", message: "Phone verification is required." });
       const triage = await triageChallenge(input.name, input.description, input.urgencyRequested);
       const challengeId = await insertChallenge({
+        citizenName: input.citizenName,
         name: input.name,
         description: input.description,
         phone: input.phone,
@@ -107,6 +117,7 @@ export const appRouter = router({
         category: triage.category,
         difficulty: triage.difficulty,
         status: "new",
+        creatorOpenId: ctx.user?.openId ?? null,
       });
       if (challengeId && input.images.length) {
         const media = [];
@@ -137,6 +148,14 @@ export const appRouter = router({
     solution: publicProcedure.input(z.object({ id: z.number(), solution: z.string().min(20) })).mutation(async ({ input }) => {
       await proposeSolution(input.id, input.solution);
       return { success: true };
+    }),
+    delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      const challenge = await getChallenge(input.id);
+      if (!challenge || !isChallengeOwner(challenge.creatorOpenId, ctx.user.openId)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only the original submitter can delete this challenge." });
+      }
+      await deleteChallenge(input.id);
+      return { success: true } as const;
     }),
   }),
   events: router({

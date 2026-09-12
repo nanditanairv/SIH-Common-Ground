@@ -109,6 +109,14 @@ export async function proposeSolution(id: number, solution: string) {
   await db.update(challenges).set({ solution, status: "solution_proposed", updatedAt: new Date() }).where(eq(challenges.id, id));
 }
 
+export async function deleteChallenge(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.delete(challengeMedia).where(eq(challengeMedia.challengeId, id));
+  await db.delete(projectUpdates).where(eq(projectUpdates.challengeId, id));
+  await db.delete(challenges).where(eq(challenges.id, id));
+}
+
 export async function listEvents() {
   const db = await getDb();
   if (!db) return [];

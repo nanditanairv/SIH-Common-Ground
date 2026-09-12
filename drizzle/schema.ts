@@ -14,6 +14,7 @@ export const users = mysqlTable("users", {
 
 export const challenges = mysqlTable("challenges", {
   id: int("id").autoincrement().primaryKey(),
+  citizenName: varchar("citizenName", { length: 180 }),
   name: varchar("name", { length: 220 }).notNull(),
   description: text("description").notNull(),
   phone: varchar("phone", { length: 24 }).notNull(),
@@ -29,6 +30,7 @@ export const challenges = mysqlTable("challenges", {
   status: mysqlEnum("status", ["new", "under_review", "in_progress", "solution_proposed", "implemented"]).default("new").notNull(),
   assignedUniversity: varchar("assignedUniversity", { length: 180 }),
   solution: text("solution"),
+  creatorOpenId: varchar("creatorOpenId", { length: 64 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
